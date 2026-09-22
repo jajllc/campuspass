@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CampusPass — College Event Ticketing</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: { brand: { DEFAULT:'#4f46e5', light:'#818cf8', dark:'#3730a3' } },
+          fontFamily: { sans:['-apple-system','Segoe UI','system-ui','sans-serif'] }
+        }
+      }
+    }
+  </script>
+  <style>
+    .modal-backdrop   { background:rgba(0,0,0,.55); }
+    .drawer-backdrop  { background:rgba(0,0,0,.45); }
+    .tag-academic     { background:#dbeafe; color:#1e40af; }
+    .tag-social       { background:#dcfce7; color:#166534; }
+    .tag-arts         { background:#fae8ff; color:#7e22ce; }
+    .tag-sports       { background:#ffedd5; color:#c2410c; }
+    .tag-tech         { background:#e0f2fe; color:#075985; }
+    .tag-other        { background:#f3f4f6; color:#374151; }
+    /* slide-over */
+    #tickets-drawer   { transform:translateX(100%); transition:transform .3s cubic-bezier(.4,0,.2,1); }
+    #tickets-drawer.open { transform:translateX(0); }
+    /* toast */
+    #toast            { transition:opacity .4s, transform .4s; }
+    /* QR grid lines */
+    .qr-cell          { width:5px; height:5px; display:inline-block; }
+  </style>
+</head>
+<body class="bg-gray-50 font-sans text-gray-800 min-h-screen">
+
+<!-- ═══════════════════════════════════ TOAST ══════════════════════════════════ -->
+<div id="toast" role="alert" aria-live="assertive"
+     class="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] hidden opacity-0 -translate-y-2
+            bg-green-600 text-white text-sm font-medium px-5 py-3 rounded-xl shadow-lg flex items-center gap-3 max-w-sm">
+  <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+  </svg>
+  <span id="toast-msg"></span>
+</div>
+
+<!-- ══════════════════════════ GLOBAL STATE & LOGIC ═════════════════════════════ -->
+<script>
+/* ── tiny helpers ── */
+function uuid() {
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>
+    (c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
+}
+function esc(s){ const d=document.createElement('div');d.textContent=s;return d.innerHTML; }
+function fmtDate(iso){
+  return new Date(iso).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+}
+function fmtTime(iso){
+  return new Date(iso).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+}
+
+/* ── State ── */
+const State = {
+  currentUser : null,
+  events : [
+    { id:uuid(), title:'Spring Hackathon 2025',       category:'tech',
+      description:'Build something amazing in 24 hours. Open to all majors. Prizes for top 3 teams.',
+      organizer:'Tech Club',            location:'Engineering Hall, Rm 101',
+      date:'2025-04-18T09:00', capacity:120, ticketsRemaining:34,  price:0,  status:'published' },
+    { id:uuid(), title:'Jazz & Jam Night',             category:'arts',
+      description:'An evening of live jazz by student ensembles. Light refreshments provided.',
+      organizer:'Music Society',        location:'Performing Arts Center',
+      date:'2025-04-25T19:30', capacity:200, ticketsRemaining:87,  price:5,  status:'published' },
+    { id:uuid(), title:'Career Fair — STEM Edition',   category:'academic',
+      description:'Meet recruiters from 40+ companies. Bring your résumé. Business casual required.',
+      organizer:'Career Center',        location:'Student Union Ballroom',
+      date:'2025-05-02T10:00', capacity:500, ticketsRemaining:212, price:0,  status:'published' },
+    { id:uuid(), title:'International Food Festival',  category:'social',
+      description:'Sample dishes from 30+ countries prepared by student cultural organizations.',
+      organizer:'Cultural Exchange Club', location:'Campus Quad',
+      date:'2025-05-10T12:00', capacity:800, ticketsRemaining:0,   price:3,  status:'published' },
+    { id:uuid(), title:'Intramural Basketball Finals', category:'sports',
+      description:'Cheer on your classmates at the championship game. Free with student ID.',
+      organizer:'Rec Sports Office',    location:'Athletic Complex — Gym A',
+      date:'2025-05-15T18:00', capacity:300, ticketsRemaining:145, price:0,  status:'published' },
+    { id:uuid(), title:'Mental Wellness Workshop',     category:'academic',
+      description:'Practical tools for managing stress and resilience during finals season.',
+      organizer:'Counseling Center',    location:'Health Sciences Bldg, Rm 202',
+      date:'2025-05-20T14:00', capacity:60,  ticketsRemaining:22,  price:0,  status:'published' }
+  ],
+  tickets       : [],
+  notifications : [],
+  activeFilter  : 'all',
+  searchQuery   : '',
+};
+
+/* ── auth ── */
+function isEduEmail(e){ return /^[^\s@]+@[^\s@]+\.edu$/i.test(e.trim()); }
+function login(name,email,role){
+  State.currentUser={id:uuid(),name,email,role};
+  renderAll(); closeAuthModal();
+}
+function logout(){
+  State.currentUser=null; State.tickets=[]; State.notifications=[];
+  renderAll(); closeTicketsDrawer();
+}
+
+/* ── tickets ── */
+function reserveTickets(eventId, qty, payMethod){
+  const ev=State.events.find(e=>e.id===eventId);
+  if(!ev||ev.ticketsRemaining<qty) return{ok:false,msg:'Not enough tickets available.'};
+  const already=State.tickets.filter(t=>t.eventId===eventId&&t.userId===State.currentUser.id).length;
+  if(already+qty>2) return{ok:false,msg:'Maximum 2 tickets per student per event.'};
+  const now=new Date().toISOString();
+  const newTickets=[];
+  for(let i=0;i<qty;i++){
+    const tid=uuid();
+    const t={
+      id:tid, eventId, userId:State.currentUser.id,
+      hashId:'CP-'+tid.slice(0,8).toUpperCase(),
+      qrPayload:JSON.stringify({studentId:State.currentUser.id,eventId,purchaseTimestamp:now,ticketId:tid,seq:i+1}),
+      payMethod, status:'reserved', reservedAt:now, qty:1
+    };
+    State.tickets.push(t); newTickets.push(t);
+  }
+  ev.ticketsRemaining-=qty;
+  addNotification('ticket_confirmed',`${qty} ticket${qty>1?'s':''} confirmed for "${ev.title}"!`);
+  console.log(`[MockEmail] To:${State.currentUser.email} | ${qty}x "${ev.title}" | Pay:${payMethod}`);
+  renderEventGrid();
+  return{ok:true,tickets:newTickets,event:ev};
+}
+
+/* ── notifications ── */
+function addNotification(type,message){
+  State.notifications.unshift({id:uuid(),userId:State.currentUser.id,type,message,read:false,createdAt:new Date().toISOString()});
+  renderNotifBell();
+}
+function markAllRead(){ State.notifications.forEach(n=>n.read=true); renderNotifBell(); renderNotifPanel(); }
+
+/* ── event creation ── */
+function publishEvent(data){
+  const ev={
+    id:uuid(), title:data.title, category:data.category,
+    description:data.description||'No description provided.',
+    organizer:State.currentUser.name, location:data.location, date:data.date,
+    capacity:parseInt(data.capacity,10), ticketsRemaining:parseInt(data.capacity,10),
+    price:parseFloat(data.price)||0, status:'published'
+  };
+  State.events.unshift(ev); renderEventGrid(); updateHeroStats();
+  showToast('Event published successfully!','green');
+  return ev;
+}
+
+/* ── filter/search ── */
+function filteredEvents(){
+  return State.events.filter(e=>{
+    if(e.status!=='published') return false;
+    const mc=State.activeFilter==='all'||e.category===State.activeFilter;
+    const q=State.searchQuery.toLowerCase();
+    const ms=!q||e.title.toLowerCase().includes(q)||e.location.toLowerCase().includes(q)||e.organizer.toLowerCase().includes(q);
+    return mc&&ms;
+  });
+}
+
+/* ── toast ── */
+let _toastTimer;
+function showToast(msg,color='green'){
+  const t=document.getElementById('toast');
+  const colors={green:'bg-green-600',red:'bg-red-500',blue:'bg-brand'};
+  t.className=t.className.replace(/bg-\S+/,colors[color]||colors.green);
+  document.getElementById('toast-msg').textContent=msg;
+  t.classList.remove('hidden'); requestAnimationFrame(()=>{ t.style.opacity='1'; t.style.transform='translateX(-50%) translateY(0)'; });
+  clearTimeout(_toastTimer);
+  _toastTimer=setTimeout(()=>{ t.style.opacity='0'; t.style.transform='translateX(-50%) translateY(-8px)';
+    setTimeout(()=>t.classList.add('hidden'),400); },3800);
+}
+
+/* ── QR code (pure SVG matrix) ── */
+function buildQrSvg(payload,size=120){
+  // Lightweight visual QR placeholder using a deterministic hash grid
+  const hash=Array.from(payload).reduce((a,c)=>((a<<5)-a+c.charCodeAt(0))|0,0);
+  const N=21; const cell=Math.floor(size/N);
+  let cells='';
+  for(let r=0;r<N;r++) for(let c=0;c<N;c++){
+    // finder patterns (corners)
+    const inFinder=(r<8&&c<8)||(r<8&&c>=N-8)||(r>=N-8&&c<8);
+    const finderBit=()=>{
+      const lr=r<8?r:N-1-r, lc=c<8?c:N-1-c;
+      if(lr===0||lr===6||lc===0||lc===6) return true;
+      if(lr>=2&&lr<=4&&lc>=2&&lc<=4) return true;
+      return false;
+    };
+    const dark= inFinder ? finderBit() : !!(((hash>>(r*N+c)%30)&1)^((r+c)%3===0?1:0));
+    if(dark) cells+=`<rect x="${c*cell}" y="${r*cell}" width="${cell}" height="${cell}" fill="#1e1b4b"/>`;
+  }
+  // quiet zone rect
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <rect width="${size}" height="${size}" fill="white"/>
+    ${cells}
+  </svg>`;
+}
+</script>
+
+<!-- ══════════════════════════════════ NAV BAR ═══════════════════════════════════ -->
+<header class="bg-white border-b border-gray-200 sticky top-0 z-40 shadow-sm">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between h-16">
+
+    <a href="#" class="flex items-center gap-2 font-bold text-xl text-brand shrink-0">
+      <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z"/>
+      </svg>
+      CampusPass
+    </a>
+
+    <nav class="hidden md:flex items-center gap-6 text-sm font-medium text-gray-600">
+      <a href="#events" class="hover:text-brand transition-colors">Events</a>
+      <button id="nav-my-tickets-btn" onclick="openTicketsDrawer()"
+        class="hidden hover:text-brand transition-colors">My Tickets</button>
+    </nav>
+
+    <div class="flex items-center gap-2">
+      <!-- Notification bell -->
+      <div id="notif-bell-wrap" class="relative hidden">
+        <button onclick="toggleNotifPanel()" class="relative p-2 rounded-full hover:bg-gray-100 transition-colors">
+          <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+          </svg>
+          <span id="notif-badge"
+            class="absolute -top-0.5 -right-0.5 hidden bg-red-500 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center"></span>
+        </button>
+        <div id="notif-panel"
+          class="hidden absolute right-0 mt-2 w-80 bg-white rounded-xl border border-gray-200 shadow-xl z-50">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+            <span class="font-semibold text-sm">Notifications</span>
+            <button onclick="markAllRead()" class="text-xs text-brand hover:underline">Mark all read</button>
+          </div>
+          <ul id="notif-list" class="max-h-72 overflow-y-auto divide-y divide-gray-50 text-sm"></ul>
+          <p id="notif-empty" class="hidden px-4 py-6 text-center text-sm text-gray-400">No notifications yet</p>
+        </div>
+      </div>
+
+      <!-- Auth area -->
+      <div id="auth-area"></div>
+
+      <!-- Mobile hamburger -->
+      <button onclick="toggleMobileMenu()" class="md:hidden p-2 rounded-lg hover:bg-gray-100" aria-label="Menu">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="mobile-menu"
+    class="hidden md:hidden border-t border-gray-100 bg-white px-4 pb-4 pt-2 flex flex-col gap-3 text-sm font-medium text-gray-600">
+    <a href="#events" class="hover:text-brand">Events</a>
+    <button id="mob-my-tickets-btn" onclick="openTicketsDrawer()"
+      class="hidden text-left hover:text-brand">My Tickets</button>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════ HERO ════════════════════════════════════ -->
+<section class="bg-gradient-to-br from-brand-dark via-brand to-brand-light text-white">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 py-16 sm:py-24 flex flex-col md:flex-row items-center gap-10">
+    <div class="flex-1 text-center md:text-left">
+      <span class="inline-block bg-white/20 text-xs font-semibold px-3 py-1 rounded-full mb-4 tracking-wide uppercase">🎓 Spring 2025 Season</span>
+      <h1 class="text-3xl sm:text-5xl font-extrabold leading-tight mb-4">Your Campus.<br/>Your Events.</h1>
+      <p class="text-indigo-100 text-base sm:text-lg max-w-lg mb-8">
+        Discover concerts, hackathons, career fairs and more — all in one place.
+        Reserve your spot instantly with your .edu email.
+      </p>
+      <div class="flex flex-col sm:flex-row gap-3 justify-center md:justify-start">
+        <a href="#events" class="bg-white text-brand font-semibold px-6 py-3 rounded-lg hover:bg-indigo-50 transition-colors text-sm">Browse Events</a>
+        <button id="hero-cta-btn" onclick="openAuthModal('register')"
+          class="border border-white/50 text-white font-semibold px-6 py-3 rounded-lg hover:bg-white/10 transition-colors text-sm">
+          Get Started Free
+        </button>
+      </div>
+    </div>
+    <div class="flex-shrink-0 grid grid-cols-2 gap-4">
+      <div class="bg-white/15 backdrop-blur rounded-xl p-5 text-center">
+        <div id="hero-stat-events" class="text-3xl font-extrabold">0</div>
+        <div class="text-indigo-200 text-xs mt-1">Upcoming Events</div>
+      </div>
+      <div class="bg-white/15 backdrop-blur rounded-xl p-5 text-center">
+        <div id="hero-stat-tickets" class="text-3xl font-extrabold">500+</div>
+        <div class="text-indigo-200 text-xs mt-1">Tickets Reserved</div>
+      </div>
+      <div class="bg-white/15 backdrop-blur rounded-xl p-5 text-center">
+        <div class="text-3xl font-extrabold">40+</div>
+        <div class="text-indigo-200 text-xs mt-1">Student Orgs</div>
+      </div>
+      <div class="bg-white/15 backdrop-blur rounded-xl p-5 text-center">
+        <div class="text-3xl font-extrabold">Free</div>
+        <div class="text-indigo-200 text-xs mt-1">To Join</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ ORGANIZER PANEL ══════════════════════════════════ -->
+<div id="organizer-panel" class="hidden bg-indigo-50 border-y border-indigo-200">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 py-8">
+    <h2 class="text-lg font-bold text-indigo-900 mb-5 flex items-center gap-2">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+      </svg>
+      Publish a New Event
+    </h2>
+    <form id="organizer-form" onsubmit="handlePublishEvent(event)"
+      class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+
+      <div class="lg:col-span-2">
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Event Title *</label>
+        <input id="ev-title" type="text" required placeholder="e.g. End-of-Year Gala"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Category *</label>
+        <select id="ev-category" required
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40">
+          <option value="">-- Select --</option>
+          <option value="academic">Academic</option>
+          <option value="arts">Arts</option>
+          <option value="social">Social</option>
+          <option value="sports">Sports</option>
+          <option value="tech">Tech</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="sm:col-span-2 lg:col-span-3">
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Description</label>
+        <textarea id="ev-desc" rows="2" placeholder="Brief description of the event…"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 resize-none"></textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Location *</label>
+        <input id="ev-location" type="text" required placeholder="e.g. Student Union, Rm 200"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Date &amp; Time *</label>
+        <input id="ev-date" type="datetime-local" required
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Capacity *</label>
+        <input id="ev-capacity" type="number" required min="1" placeholder="e.g. 150"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Ticket Price ($)</label>
+        <input id="ev-price" type="number" min="0" step="0.01" placeholder="0 for free"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+      </div>
+      <div class="sm:col-span-2 lg:col-span-3 flex justify-end">
+        <button type="submit"
+          class="bg-brand text-white font-semibold px-7 py-2.5 rounded-lg hover:bg-brand-dark transition-colors text-sm">
+          Publish Event
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════ EVENTS SECTION ══════════════════════════════ -->
+<main id="events" class="max-w-6xl mx-auto px-4 sm:px-6 py-10">
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+    <h2 class="text-xl font-bold text-gray-900">Upcoming Events</h2>
+    <div class="flex items-center gap-2 flex-wrap">
+      <!-- Search -->
+      <div class="relative">
+        <svg class="absolute left-2.5 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+        </svg>
+        <input id="search-input" type="text" placeholder="Search events…"
+          oninput="State.searchQuery=this.value; renderEventGrid()"
+          class="pl-8 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 w-44"/>
+      </div>
+    </div>
+  </div>
+  <!-- Filter pills -->
+  <div class="flex gap-2 flex-wrap mb-6" id="filter-pills">
+    <button onclick="setFilter('all')"        data-filter="all"      class="filter-pill">All</button>
+    <button onclick="setFilter('academic')"   data-filter="academic" class="filter-pill">Academic</button>
+    <button onclick="setFilter('arts')"       data-filter="arts"     class="filter-pill">Arts</button>
+    <button onclick="setFilter('social')"     data-filter="social"   class="filter-pill">Social</button>
+    <button onclick="setFilter('sports')"     data-filter="sports"   class="filter-pill">Sports</button>
+    <button onclick="setFilter('tech')"       data-filter="tech"     class="filter-pill">Tech</button>
+  </div>
+  <!-- Event grid -->
+  <div id="event-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5"></div>
+  <p id="no-events-msg" class="hidden text-center text-gray-400 py-16 text-sm">No events match your filter.</p>
+</main>
+
+<!-- ══════════════════════════════ AUTH MODAL ════════════════════════════════════ -->
+<div id="auth-modal"
+  class="modal-backdrop hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+    <!-- Tabs -->
+    <div class="flex border-b border-gray-100">
+      <button onclick="switchAuthTab('login')" id="tab-login"
+        class="flex-1 py-3.5 text-sm font-semibold transition-colors">Sign In</button>
+      <button onclick="switchAuthTab('register')" id="tab-register"
+        class="flex-1 py-3.5 text-sm font-semibold transition-colors">Create Account</button>
+    </div>
+    <div class="p-6">
+      <form id="auth-form" onsubmit="handleAuth(event)" novalidate class="flex flex-col gap-4">
+        <div id="auth-name-wrap" class="hidden flex-col gap-1">
+          <label class="text-xs font-semibold text-gray-600">Full Name *</label>
+          <input id="auth-name" type="text" placeholder="Jane Smith"
+            class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-semibold text-gray-600">University Email * <span class="text-gray-400 font-normal">(.edu required)</span></label>
+          <input id="auth-email" type="email" placeholder="you@university.edu" autocomplete="email"
+            class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+          <p id="auth-email-err" class="hidden text-red-500 text-xs mt-0.5">Must be a valid .edu email address.</p>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-semibold text-gray-600">Student ID <span class="text-gray-400 font-normal">(or password)</span></label>
+          <input id="auth-pass" type="password" placeholder="••••••••" autocomplete="current-password"
+            class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"/>
+        </div>
+        <div id="auth-role-wrap" class="hidden flex-col gap-1">
+          <label class="text-xs font-semibold text-gray-600">I am a…</label>
+          <div class="flex gap-3">
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="radio" name="auth-role" value="student" checked class="accent-brand"/> Student
+            </label>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="radio" name="auth-role" value="organizer" class="accent-brand"/> Event Organizer
+            </label>
+          </div>
+        </div>
+        <p id="auth-err" class="hidden text-red-500 text-xs -mt-1"></p>
+        <button type="submit" id="auth-submit"
+          class="bg-brand text-white font-semibold py-2.5 rounded-lg hover:bg-brand-dark transition-colors text-sm">
+          Sign In
+        </button>
+      </form>
+    </div>
+    <button onclick="closeAuthModal()"
+      class="absolute top-3 right-3 p-1.5 rounded-full hover:bg-gray-100 text-gray-400">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<!-- ══════════════════════════ TICKET PURCHASE MODAL ════════════════════════════ -->
+<div id="purchase-modal"
+  class="modal-backdrop hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+    <!-- Step: select -->
+    <div id="purchase-step-select">
+      <div class="bg-brand px-6 py-4 text-white">
+        <h3 id="pm-event-title" class="font-bold text-lg leading-tight"></h3>
+        <p id="pm-event-meta" class="text-indigo-200 text-xs mt-0.5"></p>
+      </div>
+      <div class="p-6 flex flex-col gap-5">
+        <!-- Inventory bar -->
+        <div>
+          <div class="flex justify-between text-xs text-gray-500 mb-1">
+            <span>Ticket Availability</span>
+            <span id="pm-remaining-label"></span>
+          </div>
+          <div class="w-full bg-gray-100 rounded-full h-2">
+            <div id="pm-inventory-bar" class="bg-brand rounded-full h-2 transition-all" style="width:0%"></div>
+          </div>
+        </div>
+        <!-- Qty selector -->
+        <div>
+          <label class="text-xs font-semibold text-gray-600 mb-2 block">Number of Tickets <span class="text-gray-400 font-normal">(max 2 per student)</span></label>
+          <div class="flex items-center gap-3">
+            <button onclick="adjustQty(-1)"
+              class="w-9 h-9 rounded-full border border-gray-300 flex items-center justify-center text-lg font-bold hover:bg-gray-50 transition-colors">−</button>
+            <span id="pm-qty-display" class="text-xl font-bold w-6 text-center">1</span>
+            <button onclick="adjustQty(1)"
+              class="w-9 h-9 rounded-full border border-gray-300 flex items-center justify-center text-lg font-bold hover:bg-gray-50 transition-colors">+</button>
+            <span id="pm-total-price" class="ml-auto text-lg font-bold text-brand"></span>
+          </div>
+        </div>
+        <!-- Payment method -->
+        <div>
+          <label class="text-xs font-semibold text-gray-600 mb-2 block">Payment Method</label>
+          <div class="flex flex-col gap-2">
+            <label id="pm-pay-acct-label"
+              class="flex items-center gap-3 border border-gray-200 rounded-lg px-4 py-3 cursor-pointer hover:border-brand transition-colors has-[:checked]:border-brand has-[:checked]:bg-indigo-50">
+              <input type="radio" name="pm-pay" value="student_account" checked class="accent-brand"/>
+              <span class="flex flex-col">
+                <span class="text-sm font-medium">Student Account Charge</span>
+                <span class="text-xs text-gray-400">Billed to your campus account</span>
+              </span>
+            </label>
+            <label
+              class="flex items-center gap-3 border border-gray-200 rounded-lg px-4 py-3 cursor-pointer hover:border-brand transition-colors has-[:checked]:border-brand has-[:checked]:bg-indigo-50">
+              <input type="radio" name="pm-pay" value="credit_card" class="accent-brand"/>
+              <span class="flex flex-col">
+                <span class="text-sm font-medium">Credit / Debit Card</span>
+                <span class="text-xs text-gray-400">Mock payment — no real charge</span>
+              </span>
+            </label>
+          </div>
+        </div>
+        <p id="pm-err" class="hidden text-red-500 text-xs"></p>
+        <button onclick="handlePurchase()"
+          class="bg-brand text-white font-semibold py-3 rounded-xl hover:bg-brand-dark transition-colors text-sm">
+          Confirm Purchase
+        </button>
+      </div>
+    </div>
+    <!-- Step: confirmation -->
+    <div id="purchase-step-confirm" class="hidden p-6 text-center flex flex-col items-center gap-4">
+      <div class="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center">
+        <svg class="w-7 h-7 text-green-600" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+        </svg>
+      </div>
+      <div>
+        <h3 class="text-lg font-bold text-gray-900">Order Confirmed!</h3>
+        <p class="text-sm text-gray-500 mt-1">A confirmation has been sent to your .edu email.</p>
+      </div>
+      <div id="pm-confirm-cards" class="w-full flex flex-col gap-2 text-left"></div>
+      <div class="w-full flex flex-col sm:flex-row gap-2 mt-2">
+        <button onclick="closePurchaseModal()"
+          class="flex-1 border border-gray-200 text-gray-600 font-medium py-2.5 rounded-lg hover:bg-gray-50 text-sm">Close</button>
+        <button onclick="closePurchaseModal(); openTicketsDrawer()"
+          class="flex-1 bg-brand text-white font-semibold py-2.5 rounded-lg hover:bg-brand-dark text-sm">View My Tickets</button>
+      </div>
+    </div>
+
+    <button onclick="closePurchaseModal()"
+      class="absolute top-3 right-3 p-1.5 rounded-full hover:bg-white/20 text-white">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<!-- ══════════════════════════ MY TICKETS DRAWER ════════════════════════════════ -->
+<div id="drawer-backdrop" onclick="closeTicketsDrawer()"
+  class="drawer-backdrop hidden fixed inset-0 z-40"></div>
+
+<aside id="tickets-drawer"
+  class="fixed top-0 right-0 h-full w-full max-w-md bg-white shadow-2xl z-50 flex flex-col">
+  <!-- Drawer header -->
+  <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+    <div>
+      <h2 class="font-bold text-gray-900 text-base">My Tickets</h2>
+      <p id="drawer-subtitle" class="text-xs text-gray-400 mt-0.5"></p>
+    </div>
+    <button onclick="closeTicketsDrawer()" class="p-2 rounded-full hover:bg-gray-100 text-gray-400">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <!-- Drawer body -->
+  <div id="drawer-body" class="flex-1 overflow-y-auto p-5 flex flex-col gap-4"></div>
+  <!-- Empty state -->
+  <div id="drawer-empty" class="hidden flex-1 flex flex-col items-center justify-center gap-3 text-center p-8">
+    <svg class="w-14 h-14 text-gray-200" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z"/>
+    </svg>
+    <p class="text-gray-500 text-sm font-medium">No tickets yet</p>
+    <p class="text-gray-400 text-xs">Browse upcoming events and reserve your spot!</p>
+    <button onclick="closeTicketsDrawer()" class="mt-1 text-brand text-sm font-semibold hover:underline">Browse Events</button>
+  </div>
+</aside>
+
+<!-- footer -->
+<footer class="border-t border-gray-200 bg-white mt-10 py-8">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-gray-400">
+    <div class="flex items-center gap-2 font-semibold text-gray-600">
+      <svg class="w-5 h-5 text-brand" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z"/>
+      </svg>
+      CampusPass
+    </div>
+    <span>© 2025 CampusPass. For demonstration purposes only.</span>
+  </div>
+</footer>
+
+<!-- ══════════════════════════════ APP SCRIPTS ═══════════════════════════════════ -->
+<script>
+/* ── Tailwind filter-pill base styles injected once ── */
+document.querySelectorAll('.filter-pill').forEach(b=>{
+  b.classList.add('px-4','py-1.5','rounded-full','text-sm','font-medium','border','transition-colors',
+                  'border-gray-200','bg-white','text-gray-600','hover:border-brand','hover:text-brand');
+});
+
+/* ── Filter pill active state ── */
+function setFilter(cat){
+  State.activeFilter=cat;
+  document.querySelectorAll('.filter-pill').forEach(b=>{
+    const active=b.dataset.filter===cat;
+    b.classList.toggle('bg-brand',active); b.classList.toggle('text-white',active);
+    b.classList.toggle('border-brand',active); b.classList.toggle('bg-white',!active);
+    b.classList.toggle('text-gray-600',!active);
+  });
+  renderEventGrid();
+}
+setFilter('all');
+
+/* ── Mobile menu ── */
+function toggleMobileMenu(){
+  document.getElementById('mobile-menu').classList.toggle('hidden');
+}
+
+/* ══════════════ RENDER FUNCTIONS ══════════════ */
+
+function renderAll(){
+  renderAuthArea(); renderEventGrid(); updateHeroStats();
+  renderNotifBell(); renderOrganizerPanel();
+  const u=State.currentUser;
+  const show=!!u;
+  document.getElementById('notif-bell-wrap').classList.toggle('hidden',!show);
+  document.getElementById('nav-my-tickets-btn').classList.toggle('hidden',!show);
+  document.getElementById('mob-my-tickets-btn').classList.toggle('hidden',!show);
+  // hide hero CTA if logged in
+  const heroCta=document.getElementById('hero-cta-btn');
+  if(u){ heroCta.textContent='View My Tickets'; heroCta.onclick=openTicketsDrawer; }
+  else { heroCta.textContent='Get Started Free'; heroCta.onclick=()=>openAuthModal('register'); }
+}
+
+function renderAuthArea(){
+  const el=document.getElementById('auth-area');
+  const u=State.currentUser;
+  if(!u){
+    el.innerHTML=`
+      <button onclick="openAuthModal('login')"
+        class="text-sm font-medium text-gray-600 hover:text-brand px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors hidden sm:block">
+        Sign In
+      </button>
+      <button onclick="openAuthModal('register')"
+        class="bg-brand text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-brand-dark transition-colors">
+        Get Started
+      </button>`;
+  } else {
+    const initials=u.name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+    el.innerHTML=`
+      <div class="relative" id="user-menu-wrap">
+        <button onclick="toggleUserMenu()"
+          class="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-full hover:bg-gray-100 transition-colors">
+          <span class="w-7 h-7 rounded-full bg-brand text-white text-xs font-bold flex items-center justify-center">${esc(initials)}</span>
+          <span class="text-sm font-medium text-gray-700 hidden sm:block max-w-[120px] truncate">${esc(u.name)}</span>
+          <svg class="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div id="user-menu"
+          class="hidden absolute right-0 mt-2 w-48 bg-white rounded-xl border border-gray-200 shadow-lg z-50 py-1 text-sm">
+          <div class="px-4 py-2.5 border-b border-gray-100">
+            <p class="font-semibold text-gray-800 truncate">${esc(u.name)}</p>
+            <p class="text-xs text-gray-400 truncate">${esc(u.email)}</p>
+            <span class="inline-block mt-1 text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full ${u.role==='organizer'?'bg-purple-100 text-purple-700':'bg-indigo-100 text-indigo-700'}">${u.role}</span>
+          </div>
+          <button onclick="openTicketsDrawer(); toggleUserMenu()" class="w-full text-left px-4 py-2.5 hover:bg-gray-50 transition-colors">My Tickets</button>
+          <button onclick="logout(); toggleUserMenu()" class="w-full text-left px-4 py-2.5 text-red-500 hover:bg-red-50 transition-colors">Sign Out</button>
+        </div>
+      </div>`;
+  }
+}
+
+function toggleUserMenu(){
+  const m=document.getElementById('user-menu');
+  if(m) m.classList.toggle('hidden');
+}
+// close user menu on outside click
+document.addEventListener('click',e=>{
+  const wrap=document.getElementById('user-menu-wrap');
+  if(wrap&&!wrap.contains(e.target)){
+    const m=document.getElementById('user-menu');
+    if(m) m.classList.add('hidden');
+  }
+});
+
+function renderOrganizerPanel(){
+  const panel=document.getElementById('organizer-panel');
+  panel.classList.toggle('hidden', !(State.currentUser&&State.currentUser.role==='organizer'));
+}
+
+function updateHeroStats(){
+  document.getElementById('hero-stat-events').textContent=
+    State.events.filter(e=>e.status==='published').length;
+}
+
+/* ── Event Grid ── */
+function renderEventGrid(){
+  const grid=document.getElementById('event-grid');
+  const msg=document.getElementById('no-events-msg');
+  const evs=filteredEvents();
+  if(!evs.length){ grid.innerHTML=''; msg.classList.remove('hidden'); return; }
+  msg.classList.add('hidden');
+  grid.innerHTML=evs.map(ev=>eventCardHTML(ev)).join('');
+  updateHeroStats();
+}
+
+function eventCardHTML(ev){
+  const sold=ev.ticketsRemaining===0;
+  const pct=Math.round((ev.ticketsRemaining/ev.capacity)*100);
+  const barColor=pct>40?'bg-green-500':pct>15?'bg-yellow-400':'bg-red-400';
+  const price=ev.price===0?'<span class="text-green-600 font-semibold">Free</span>'
+    :`<span class="font-semibold">$${ev.price.toFixed(2)}</span>`;
+  const alreadyHas=State.currentUser&&State.tickets.filter(t=>t.eventId===ev.id&&t.userId===State.currentUser.id).length>=2;
+  let btnHTML;
+  if(sold){
+    btnHTML=`<button disabled class="w-full py-2.5 rounded-lg text-sm font-semibold bg-gray-100 text-gray-400 cursor-not-allowed">Sold Out</button>`;
+  } else if(!State.currentUser){
+    btnHTML=`<button onclick="openAuthModal('login')" class="w-full py-2.5 rounded-lg text-sm font-semibold bg-brand text-white hover:bg-brand-dark transition-colors">Sign In to Reserve</button>`;
+  } else if(alreadyHas){
+    btnHTML=`<button onclick="openTicketsDrawer()" class="w-full py-2.5 rounded-lg text-sm font-semibold border border-brand text-brand hover:bg-indigo-50 transition-colors">View My Ticket</button>`;
+  } else {
+    btnHTML=`<button onclick="openPurchaseModal('${ev.id}')" class="w-full py-2.5 rounded-lg text-sm font-semibold bg-brand text-white hover:bg-brand-dark transition-colors">Get Ticket</button>`;
+  }
+  return `
+  <article class="bg-white rounded-2xl border border-gray-200 flex flex-col overflow-hidden hover:shadow-md transition-shadow">
+    <div class="h-2 ${sold?'bg-gray-200':barColor}"></div>
+    <div class="p-5 flex flex-col gap-3 flex-1">
+      <div class="flex items-start justify-between gap-2">
+        <span class="tag-${ev.category} text-[10px] font-bold uppercase px-2 py-0.5 rounded-full tracking-wide">${ev.category}</span>
+        ${sold?'<span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-red-100 text-red-600">Sold Out</span>':''}
+      </div>
+      <h3 class="font-bold text-gray-900 text-base leading-snug">${esc(ev.title)}</h3>
+      <p class="text-xs text-gray-500 line-clamp-2">${esc(ev.description)}</p>
+      <div class="flex flex-col gap-1 text-xs text-gray-500 mt-auto">
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+          ${fmtDate(ev.date)} · ${fmtTime(ev.date)}
+        </span>
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          ${esc(ev.location)}
+        </span>
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0"/>
+          </svg>
+          By ${esc(ev.organizer)}
+        </span>
+      </div>
+      <!-- inventory mini-bar -->
+      ${!sold?`
+      <div class="mt-1">
+        <div class="flex justify-between text-[10px] text-gray-400 mb-0.5">
+          <span>${ev.ticketsRemaining} left</span><span>${ev.capacity} total</span>
+        </div>
+        <div class="h-1.5 bg-gray-100 rounded-full"><div class="${barColor} h-1.5 rounded-full" style="width:${pct}%"></div></div>
+      </div>`:''}
+      <div class="flex items-center justify-between mt-2 pt-3 border-t border-gray-100">
+        <span>${price}</span>
+        ${btnHTML}
+      </div>
+    </div>
+  </article>`;
+}
+
+/* ── Notification bell & panel ── */
+function renderNotifBell(){
+  const unread=State.notifications.filter(n=>n.read===false).length;
+  const badge=document.getElementById('notif-badge');
+  badge.textContent=unread>9?'9+':unread;
+  badge.classList.toggle('hidden',unread===0);
+}
+function renderNotifPanel(){
+  const list=document.getElementById('notif-list');
+  const empty=document.getElementById('notif-empty');
+  const ns=State.notifications.filter(n=>n.userId===State.currentUser?.id);
+  if(!ns.length){ list.innerHTML=''; empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  list.innerHTML=ns.map(n=>`
+    <li class="flex gap-3 px-4 py-3 ${n.read?'':'bg-indigo-50/40'}">
+      <span class="mt-0.5 w-1.5 h-1.5 rounded-full shrink-0 ${n.read?'bg-transparent':'bg-brand'} mt-1.5"></span>
+      <div>
+        <p class="text-sm text-gray-700 leading-snug">${esc(n.message)}</p>
+        <p class="text-[10px] text-gray-400 mt-0.5">${new Date(n.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</p>
+      </div>
+    </li>`).join('');
+}
+function toggleNotifPanel(){
+  const p=document.getElementById('notif-panel');
+  const open=p.classList.toggle('hidden');
+  if(!open) renderNotifPanel();
+}
+document.addEventListener('click',e=>{
+  const wrap=document.getElementById('notif-bell-wrap');
+  if(wrap&&!wrap.contains(e.target)) document.getElementById('notif-panel').classList.add('hidden');
+});
+
+/* ══════════════ AUTH MODAL ══════════════ */
+let _authTab='login';
+function openAuthModal(tab='login'){
+  switchAuthTab(tab);
+  document.getElementById('auth-modal').classList.remove('hidden');
+}
+function closeAuthModal(){ document.getElementById('auth-modal').classList.add('hidden'); }
+function switchAuthTab(tab){
+  _authTab=tab;
+  const isReg=tab==='register';
+  document.getElementById('tab-login').className=
+    `flex-1 py-3.5 text-sm font-semibold transition-colors ${!isReg?'text-brand border-b-2 border-brand':'text-gray-400 hover:text-gray-600'}`;
+  document.getElementById('tab-register').className=
+    `flex-1 py-3.5 text-sm font-semibold transition-colors ${isReg?'text-brand border-b-2 border-brand':'text-gray-400 hover:text-gray-600'}`;
+  document.getElementById('auth-name-wrap').classList.toggle('hidden',!isReg);
+  document.getElementById('auth-name-wrap').classList.toggle('flex',isReg);
+  document.getElementById('auth-role-wrap').classList.toggle('hidden',!isReg);
+  document.getElementById('auth-role-wrap').classList.toggle('flex',isReg);
+  document.getElementById('auth-submit').textContent=isReg?'Create Account':'Sign In';
+  document.getElementById('auth-err').classList.add('hidden');
+  document.getElementById('auth-email-err').classList.add('hidden');
+}
+function handleAuth(e){
+  e.preventDefault();
+  const email=document.getElementById('auth-email').value.trim();
+  const errEl=document.getElementById('auth-err');
+  const emailErr=document.getElementById('auth-email-err');
+  errEl.classList.add('hidden'); emailErr.classList.add('hidden');
+  if(!isEduEmail(email)){ emailErr.classList.remove('hidden'); return; }
+  if(_authTab==='register'){
+    const name=document.getElementById('auth-name').value.trim();
+    if(!name){ errEl.textContent='Please enter your full name.'; errEl.classList.remove('hidden'); return; }
+    const pass=document.getElementById('auth-pass').value;
+    if(pass.length<4){ errEl.textContent='Student ID must be at least 4 characters.'; errEl.classList.remove('hidden'); return; }
+    const role=document.querySelector('input[name="auth-role"]:checked').value;
+    login(name,email,role);
+    showToast(`Welcome to CampusPass, ${name.split(' ')[0]}!`,'green');
+  } else {
+    const pass=document.getElementById('auth-pass').value;
+    if(!pass){ errEl.textContent='Please enter your Student ID.'; errEl.classList.remove('hidden'); return; }
+    // mock: any valid .edu + non-empty pass signs in as student
+    const name=email.split('@')[0].replace(/[.\-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+    login(name,email,'student');
+    showToast(`Welcome back, ${name.split(' ')[0]}!`,'green');
+  }
+}
+document.getElementById('auth-modal').addEventListener('click',function(e){
+  if(e.target===this) closeAuthModal();
+});
+
+/* ══════════════ PURCHASE MODAL ══════════════ */
+let _pmEventId=null, _pmQty=1;
+function openPurchaseModal(eventId){
+  if(!State.currentUser){ openAuthModal('login'); return; }
+  const ev=State.events.find(e=>e.id===eventId);
+  if(!ev) return;
+  _pmEventId=eventId; _pmQty=1;
+
+  // reset to select step
+  document.getElementById('purchase-step-select').classList.remove('hidden');
+  document.getElementById('purchase-step-confirm').classList.add('hidden');
+
+  document.getElementById('pm-event-title').textContent=ev.title;
+  document.getElementById('pm-event-meta').textContent=`${fmtDate(ev.date)} · ${fmtTime(ev.date)} · ${ev.location}`;
+  updatePurchaseUI(ev);
+  document.getElementById('pm-err').classList.add('hidden');
+  // reset close btn color for select step
+  document.querySelector('#purchase-modal > div > button').className=
+    'absolute top-3 right-3 p-1.5 rounded-full hover:bg-white/20 text-white';
+  document.getElementById('purchase-modal').classList.remove('hidden');
+}
+function updatePurchaseUI(ev){
+  ev=ev||State.events.find(e=>e.id===_pmEventId);
+  const rem=ev.ticketsRemaining;
+  const pct=Math.round((rem/ev.capacity)*100);
+  document.getElementById('pm-remaining-label').textContent=`${rem} of ${ev.capacity} remaining`;
+  const bar=document.getElementById('pm-inventory-bar');
+  bar.style.width=pct+'%';
+  bar.className=`rounded-full h-2 transition-all ${pct>40?'bg-brand':pct>15?'bg-yellow-400':'bg-red-400'}`;
+  document.getElementById('pm-qty-display').textContent=_pmQty;
+  const total=ev.price*_pmQty;
+  document.getElementById('pm-total-price').textContent=ev.price===0?'Free':`$${total.toFixed(2)}`;
+  // cap qty at remaining and 2
+  const already=State.tickets.filter(t=>t.eventId===_pmEventId&&t.userId===State.currentUser.id).length;
+  const max=Math.min(2-already, rem);
+  if(_pmQty>max) _pmQty=Math.max(1,max);
+  document.getElementById('pm-qty-display').textContent=_pmQty;
+}
+function adjustQty(delta){
+  const ev=State.events.find(e=>e.id===_pmEventId); if(!ev) return;
+  const already=State.tickets.filter(t=>t.eventId===_pmEventId&&t.userId===State.currentUser.id).length;
+  const max=Math.min(2-already, ev.ticketsRemaining);
+  _pmQty=Math.max(1,Math.min(max,_pmQty+delta));
+  updatePurchaseUI(ev);
+}
+function handlePurchase(){
+  const ev=State.events.find(e=>e.id===_pmEventId); if(!ev) return;
+  const payMethod=document.querySelector('input[name="pm-pay"]:checked').value;
+  const errEl=document.getElementById('pm-err');
+  errEl.classList.add('hidden');
+  const res=reserveTickets(_pmEventId,_pmQty,payMethod);
+  if(!res.ok){ errEl.textContent=res.msg; errEl.classList.remove('hidden'); return; }
+
+  // show confirmation step
+  document.getElementById('purchase-step-select').classList.add('hidden');
+  const conf=document.getElementById('purchase-step-confirm');
+  conf.classList.remove('hidden');
+  // change close button style
+  document.querySelector('#purchase-modal > div > button').className=
+    'absolute top-3 right-3 p-1.5 rounded-full hover:bg-gray-100 text-gray-400';
+
+  // render confirmation cards (one per ticket)
+  document.getElementById('pm-confirm-cards').innerHTML=res.tickets.map(t=>`
+    <div class="border border-gray-200 rounded-xl p-4 flex items-start gap-4">
+      <div class="shrink-0">${buildQrSvg(t.qrPayload,72)}</div>
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-gray-900 text-sm truncate">${esc(ev.title)}</p>
+        <p class="text-xs text-gray-500 mt-0.5">${fmtDate(ev.date)} · ${fmtTime(ev.date)}</p>
+        <p class="text-xs text-gray-500 mt-0.5">${esc(ev.location)}</p>
+        <div class="mt-2 flex flex-wrap gap-1.5">
+          <span class="bg-indigo-50 text-brand text-[10px] font-mono font-bold px-2 py-0.5 rounded">${t.hashId}</span>
+          <span class="bg-gray-100 text-gray-500 text-[10px] px-2 py-0.5 rounded capitalize">${payMethod.replace('_',' ')}</span>
+        </div>
+      </div>
+    </div>`).join('');
+
+  // toast
+  showToast(`Ticket reserved! Confirmation sent to ${State.currentUser.email}`,'green');
+  renderEventGrid();
+}
+function closePurchaseModal(){
+  document.getElementById('purchase-modal').classList.add('hidden');
+  _pmEventId=null; _pmQty=1;
+}
+document.getElementById('purchase-modal').addEventListener('click',function(e){
+  if(e.target===this) closePurchaseModal();
+});
+
+/* ══════════════ TICKETS DRAWER ══════════════ */
+function openTicketsDrawer(){
+  if(!State.currentUser){ openAuthModal('login'); return; }
+  renderTicketsDrawer();
+  document.getElementById('drawer-backdrop').classList.remove('hidden');
+  document.getElementById('tickets-drawer').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeTicketsDrawer(){
+  document.getElementById('drawer-backdrop').classList.add('hidden');
+  document.getElementById('tickets-drawer').classList.remove('open');
+  document.body.style.overflow='';
+}
+function renderTicketsDrawer(){
+  const myTickets=State.tickets.filter(t=>t.userId===State.currentUser.id);
+  const body=document.getElementById('drawer-body');
+  const empty=document.getElementById('drawer-empty');
+  const subtitle=document.getElementById('drawer-subtitle');
+  subtitle.textContent=myTickets.length
+    ? `${myTickets.length} ticket${myTickets.length>1?'s':''} reserved`
+    : '';
+  if(!myTickets.length){
+    body.innerHTML=''; body.classList.add('hidden'); empty.classList.remove('hidden'); return;
+  }
+  body.classList.remove('hidden'); empty.classList.add('hidden');
+  body.innerHTML=myTickets.map(t=>{
+    const ev=State.events.find(e=>e.id===t.eventId);
+    if(!ev) return '';
+    const qrData=JSON.parse(t.qrPayload);
+    return `
+    <div class="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm">
+      <!-- colour band by category -->
+      <div class="h-1.5 tag-${ev.category}" style="background:${catColor(ev.category)}"></div>
+      <div class="p-4 flex gap-4">
+        <!-- QR code -->
+        <div class="shrink-0 flex flex-col items-center gap-1">
+          ${buildQrSvg(t.qrPayload,100)}
+          <span class="text-[9px] text-gray-400 font-mono">${t.hashId}</span>
+        </div>
+        <!-- Details -->
+        <div class="flex-1 min-w-0 flex flex-col gap-1.5">
+          <h4 class="font-bold text-gray-900 text-sm leading-snug">${esc(ev.title)}</h4>
+          <p class="text-xs text-gray-500 flex items-center gap-1">
+            <svg class="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+            </svg>
+            ${fmtDate(ev.date)}, ${fmtTime(ev.date)}
+          </p>
+          <p class="text-xs text-gray-500 flex items-center gap-1">
+            <svg class="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+            </svg>
+            ${esc(ev.location)}
+          </p>
+          <div class="mt-auto flex flex-wrap gap-1.5 pt-1 border-t border-gray-100">
+            <span class="tag-${ev.category} text-[10px] font-bold uppercase px-2 py-0.5 rounded-full">${ev.category}</span>
+            <span class="bg-gray-100 text-gray-500 text-[10px] px-2 py-0.5 rounded capitalize">${(t.payMethod||'').replace('_',' ')}</span>
+            <span class="bg-green-50 text-green-700 text-[10px] font-semibold px-2 py-0.5 rounded">${t.status}</span>
+          </div>
+          <!-- QR payload details -->
+          <div class="bg-gray-50 rounded-lg p-2 mt-1 text-[10px] text-gray-400 font-mono space-y-0.5">
+            <div><span class="text-gray-500">Student:</span> ${qrData.studentId.slice(0,12)}…</div>
+            <div><span class="text-gray-500">Event:</span> ${qrData.eventId.slice(0,12)}…</div>
+            <div><span class="text-gray-500">Purchased:</span> ${new Date(qrData.purchaseTimestamp).toLocaleString()}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function catColor(c){
+  const map={academic:'#1e40af',arts:'#7e22ce',social:'#166534',sports:'#c2410c',tech:'#075985',other:'#374151'};
+  return map[c]||map.other;
+}
+
+/* ══════════════ ORGANIZER FORM ══════════════ */
+function handlePublishEvent(e){
+  e.preventDefault();
+  publishEvent({
+    title   : document.getElementById('ev-title').value,
+    category: document.getElementById('ev-category').value,
+    description: document.getElementById('ev-desc').value,
+    location: document.getElementById('ev-location').value,
+    date    : document.getElementById('ev-date').value,
+    capacity: document.getElementById('ev-capacity').value,
+    price   : document.getElementById('ev-price').value,
+  });
+  document.getElementById('organizer-form').reset();
+}
+
+/* ══════════════ INIT ══════════════ */
+renderAll();
+</script>
+</body>
+</html>
