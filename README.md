@@ -34,7 +34,7 @@
 
 ## 1. Project Overview
 
-**CampusPass** is a lightweight, front-end-only event ticketing platform designed for college campuses. Student organizations can publish events; students can discover, reserve, and manage tickets — all from a single HTML file with no build tooling, no backend server, and no database required.
+**CampusPass** is a lightweight, front-end-only event ticketing platform designed for college campuses. Student organizations can publish events; students can discover, reserve, and manage tickets — all from a single HTML file with no build tooling, no backend server, and no database required. This platform was planned and built using IBM BOB during a 60 minute webinar for a group of college students. CampusPass is for DEMO purposes only.
 
 ### Who it's for
 
